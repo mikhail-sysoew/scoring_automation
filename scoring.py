@@ -1,32 +1,7 @@
-
-# coding: utf-8
-
-# In[1]:
-
-import sklearn as sk
-import numpy as np
-import pandas as pd
-import xgboost as xgb
-from sklearn import linear_model
-from sklearn.model_selection import KFold
-from sklearn import metrics
-from sklearn import model_selection
-from sklearn import cross_validation
-from sklearn import tree
-from sklearn.model_selection import cross_val_score
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import roc_auc_score
-import pydotplus
-from IPython.display import Image  
-import pydot 
-import warnings
-warnings.filterwarnings("ignore")
-
-
 #Возращает оптимальное разбиение непрерывной переменной
 def split_numeric(x,y,max_bins):
-    x_train_t = x[x.notnull()] #Учим только на непустых значениях    
-    y_train_t = y[x.notnull()]
+    x_train_t = np.array(x[x.notnull()]) #Учим только на непустых значениях    
+    y_train_t = np.array(y[x.notnull()])
     x_train_t = x_train_t.reshape(x_train_t.shape[0], 1) #Это нужно для работы DecisionTreeClassifier
     m_depth = int(np.log2(max_bins)) + 1 #Максимальная глубина дерева
     bad_rate = y.mean()
@@ -136,7 +111,7 @@ def binning(x,y,max_bins,mode,optimal_bins):
         x_bin = split_categorial(x,y)          
         if mode=='one-hot': return pd.get_dummies(x_bin,prefix=x.name,drop_first=True)
         if mode=='normal': return pd.DataFrame(x_bin)
-    if mode=='binning':
+    if (mode=='binning')&(variable_type=='numeric'):
         x_bins = split_numeric(x,y,max_bins)
         return x_bins
         
@@ -196,7 +171,7 @@ def iv_selection(x,y,iv_threshold):
         x_iv = iv_table(x_bin,y)
         iv = iv_value(x_iv)
         if (iv<iv_threshold)|(iv>5): x_bins.pop(i)
-        print('________________________________________________________________')
+        print('________________________________________________________________________________________________________________')
         print('                                                             ')
         print(i,"  IV = ", iv)
         print(x_iv)
@@ -257,7 +232,7 @@ def exclude_corr_factors(x_dev_t, corr_threshold,mode):
     #Заполняем диагональ нулями
     for i in range(len(x_c.columns)):        
         x_c[x_c.columns[i]][x_c[x_c.columns[i]].index.values[i]] = 0
-    while len(var_list)>1:
+    while len(var_list)>1&len(x_c)>0:
         for i in range(len(x_c.columns)):        
             x_c[x_c.columns[i]][x_c[x_c.columns[i]].index.values[i]] = 0
         #Если нашли хотя бы одну колонку, которая коррелирует с первой, создаем пару в corr_list и записываем туда первую колонку
@@ -274,7 +249,7 @@ def exclude_corr_factors(x_dev_t, corr_threshold,mode):
             x_c = x_dev_drop.corr()
             corr_list.append([])
             exclude_iteration = exclude_iteration+1
-            #print("Excluding correlations. Iteration = ",exclude_iteration,"Corr list: ", corr_list)
+            print("Excluding correlations. Iteration = ",exclude_iteration,"Corr list: ", corr_list)
     #После обработки corr_list содержит все списки коррелирующих колонок. Из каждого списка оставляем только одну
     cols_to_drop=[] #Список колонок, которые надо выкинуть
     for i in range(len(corr_list)):
@@ -288,24 +263,24 @@ def exclude_corr_factors(x_dev_t, corr_threshold,mode):
     if mode=='list': return exclude_list
 
 #Строит скоркарту
-def build_model(x_dev,y):
+def build_model(x,y):
     from sklearn.linear_model import LogisticRegression
     from sklearn import metrics
     logit_model = LogisticRegression()
-    logit_model.fit(x_dev,y)
+    logit_model.fit(x,y)
     return logit_model
 
 #Выводит готовую скоркарту
-def scorecard_view(variables, model, odds_X_to_one,odds_score,double_odds):
+def scorecard_view(col_list, model, odds_X_to_one,odds_score,double_odds):
     print('Printing scorecard...')
     cols = np.array('Intercept')
-    cols = np.append(cols,np.array(x_dev.columns))
+    cols = np.append(cols,np.array(col_list))
     vals = np.array(model_logit.intercept_)
     vals = np.append(vals,np.array(model_logit.coef_))
     scorecard = pd.DataFrame(cols)
     scorecard.rename(columns={0: 'Variable'},inplace=True)
     scorecard["Regression_coef"] = pd.DataFrame(vals)
-    b = double_odds/np.log(odds_X_to_one)
+    b = double_odds/np.log(2)
     a = odds_score - b*np.log(odds_X_to_one)    
     scorecard["Score"] = scorecard["Regression_coef"]*b
     scorecard["Score"][0] = scorecard["Score"][0]+a
@@ -315,4 +290,3 @@ def scorecard_view(variables, model, odds_X_to_one,odds_score,double_odds):
 def gini(model,x,y):
     print('GINI = ',2*roc_auc_score(y,model.predict_proba(x)[:,1])-1)
             
-
