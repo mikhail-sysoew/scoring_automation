@@ -288,5 +288,7 @@ def scorecard_view(col_list, model, odds_X_to_one,odds_score,double_odds):
     return scorecard
 
 def gini(model,x,y):
-    print('GINI = ',2*roc_auc_score(y,model.predict_proba(x)[:,1])-1)
+    gini =  2*roc_auc_score(y,model.predict_proba(x)[:,1])-1
+    print('GINI = ',2*roc_auc_score(y,model.predict_proba(x)[:,1])-1)   
+    return gini
             
