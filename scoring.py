@@ -13,17 +13,18 @@ from sklearn.model_selection import cross_val_score
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score
 from sklearn.linear_model import LogisticRegression
-warnings.simplefilter('ignore')
+warnings.simplefilter('ignore', DeprecationWarning)
 
 
 class Scorecard():
-    def __init__(self, max_bins=8, minimum_leaf=0.025, corr_threshold=0.8, odds_X_to_one = 100, odds_score=700, double_odds=25):        
+    def __init__(self, max_bins=16, minimum_leaf=0.025, corr_threshold=0.9, odds_X_to_one = 100, odds_score=700, double_odds=25):        
         self.regressor=LogisticRegression() #Regression build method
         self.x = pd.DataFrame() #Input sample
         self.y = pd.DataFrame() #Targets
         self.vars = []
         self.vars_after_iv_cut = []
         self.vars_after_corr_cut = []
+        self.vars_after_corr_cut_one_hot = []
         self.var_list_types = {} #Types of variables
         self.var_list_bins = {} #Binning of scorecard variables dictionary
         self.scorecard = pd.DataFrame() #Final scorecard representation
@@ -40,22 +41,28 @@ class Scorecard():
         self.odds_score = odds_score
         self.double_odds = double_odds
         self.x_binned = pd.DataFrame()
+        self.x_corr_matrix = []
         
    
   
     #Learn model on sample
-    def fit(self,x,y,iv_treshold):        
+    def fit(self,x,y,iv_threshold):        
         self.x = x
         self.y = y
+        self.vars_after_iv_cut = []
         self.x = self.x.reset_index()
         self.y = self.y.reset_index()
         del self.x["index"]
         del self.y["index"]      
-        self.fill_vars_cats()          
-        #print('Binning columns...')
+        self.fill_vars_cats()   
+        print("Start excluding correlations on main sample")
+        self.x_corr_matrix = self.x.corr()
+        self.exclude_corr_factors(mode='normal')   
+        print("Finish excluding correlations on main sample")
+        print('Start binning columns...')
         #fill all values of var_list_bins
         for col in self.x.columns: 
-            #print(col)
+            print('Binning: ',col)
             self.binning(mode_forward='binning',mode_output='normal',column_name=col)  
             #Filling IV table on current variable
             df_t = pd.DataFrame(self.binning(mode_forward='forward',mode_output='normal',column_name=col))
@@ -75,16 +82,17 @@ class Scorecard():
             iv = (df_iv["per_good"] - df_iv["per_bad"])*np.log((df_iv["per_good"])/(df_iv["per_bad"]+0.000000001))
             df_iv["iv"] = iv.sum()       
             self.iv_table[col] = df_iv
-            if df_iv["iv"].mean()>=iv_treshold: self.vars_after_iv_cut.append(col)
+            if df_iv["iv"].mean()>=iv_threshold: self.vars_after_iv_cut.append(col)
+            print('       IV = ', iv.sum())
         #creating sample in one-hot view
         self.x_one_hot = pd.DataFrame(self.x.index.values)       
         for col in self.vars_after_iv_cut:          
             self.x_one_hot = pd.merge(self.x_one_hot, pd.DataFrame(self.binning(mode_forward='forward',mode_output='one-hot',column_name=col)),left_index=True,right_index=True)
         del self.x_one_hot[self.x_one_hot.columns[0]]
         self.x = self.x[self.vars_after_iv_cut] 
-        #print('Exclude correlations...')
-        self.exclude_corr_factors()   
-        #print('Building regression...')
+        print('Exclude correlations on one-hot...')
+        self.exclude_corr_factors(mode='one-hot')   
+        print('Building regression...')
         self.regressor.fit(self.x_one_hot,self.y)
         self.scorecard_view()
         
@@ -96,12 +104,13 @@ class Scorecard():
         cols_to_delete = set(self.x.columns) - set(self.vars_after_iv_cut)
         for c in cols_to_delete:
             del self.x[c]
-        for col in self.x.columns:
+        for col in self.vars_after_iv_cut:
             self.x_binned = pd.merge(self.x_binned,pd.DataFrame(self.binning(mode_forward='forward',mode_output='one-hot',column_name = col)),left_index=True,right_index=True)
             #del x_binned[x_binned.columns[0]]
         cols_to_delete = set(self.x_binned.columns) - set(self.scorecard["Variable"])
         for c in cols_to_delete:
             del self.x_binned[c]
+        self.x_binned = self.x_binned.reindex_axis(sorted(self.x_binned), axis=1) 
         return self.regressor.predict_proba(self.x_binned)[:,1]
         
     def predict_score(self,x):
@@ -115,7 +124,7 @@ class Scorecard():
       #  print('Printing scorecard...')
         self.scorecard=[]
         cols = np.array('Intercept')
-        cols = np.append(cols,np.array(self.vars_after_corr_cut))
+        cols = np.append(cols,np.array(self.vars_after_corr_cut_one_hot))
         vals = np.array(self.regressor.intercept_)
         vals = np.append(vals,np.array(self.regressor.coef_))
         self.scorecard = pd.DataFrame(cols)
@@ -123,62 +132,31 @@ class Scorecard():
         self.scorecard["Regression_coef"] = pd.DataFrame(vals)
         b = self.double_odds/np.log(2)
         a = self.odds_score - b*np.log(self.odds_X_to_one)    
-        self.scorecard["Score"] = self.scorecard["Regression_coef"]*b
+        self.scorecard["Score"] = -self.scorecard["Regression_coef"]*b
         self.scorecard["Score"][0] = self.scorecard["Score"][0]+a
         self.scorecard["Score"] = round(self.scorecard["Score"],2)
         
     
     
     #Exclude correlations. Fill vars_after_corr_cut. Exclude correlated columns from x_one_hot
-    def exclude_corr_factors(self):
-        x_corr = self.x_one_hot.corr()
-        #Оставляем только колонки - потенциальные кандидаты на исключение (хотя бы одно значение корреляции выше трешхолда)
-        col_list=[]    
-        for i in range(len(x_corr.columns)):
-            #Заменяем диагональные значения на 0    
-            x_corr[x_corr.columns[i]][x_corr[x_corr.columns[i]].index.values[i]] = 0
-            #Если в колонке найдено, хотя бы одно значение с корреляцией больше трешхолда, добавляем ее в лист
-            if max(abs(x_corr[x_corr.columns[i]]))>self.corr_threshold: col_list.append(x_corr.columns[i])
-        #Оставляем только те колонки, из которых нужно выбрать которые выкинуть из-за корреляций            
-        x_dev_drop =  self.x_one_hot[col_list]
-        #Строим корреляционную матрицу из оставшихся
-        x_c = x_dev_drop.corr()
-        #Пустой список
-        corr_list = []
-        corr_list.append([])
-        exclude_iteration = 0
-        var_list = [0,1]
-        #Заполняем диагональ нулями
-        for i in range(len(x_c.columns)):        
-            x_c[x_c.columns[i]][x_c[x_c.columns[i]].index.values[i]] = 0
-        while len(var_list)>1&len(x_c)>0:
-            for i in range(len(x_c.columns)):        
-                x_c[x_c.columns[i]][x_c[x_c.columns[i]].index.values[i]] = 0
-            #Если нашли хотя бы одну колонку, которая коррелирует с первой, создаем пару в corr_list и записываем туда первую колонку
-            if max(abs(x_c[x_c.columns[0]]))>=self.corr_threshold:     
-                corr_list[exclude_iteration].append(x_c.columns[0])
-            #Пробегаемся по всем колонкам
-                for i in range(len(x_c.columns)):
-            #Записываем в пару к первой все коррелирующие с ней колонки
-                    if abs(x_c[x_c.columns[0]].iloc[i])>=self.corr_threshold:
-                        corr_list[exclude_iteration].append(x_c.columns[i])
-                #Выкидываем все колонки, которые коррелируют с первой
-                var_list = [x for x in x_c.columns.values if x not in corr_list[exclude_iteration]]
-                x_dev_drop = x_dev_drop[var_list]
-                x_c = x_dev_drop.corr()
-                corr_list.append([])
-                exclude_iteration = exclude_iteration+1
-                #print("Excluding correlations. Iteration = ",exclude_iteration,"Corr list: ", corr_list)
-        #После обработки corr_list содержит все списки коррелирующих колонок. Из каждого списка оставляем только одну
-        cols_to_drop=[] #Список колонок, которые надо выкинуть
-        for i in range(len(corr_list)):
-            for j in range(len(corr_list[i])):
-                if j!=0: 
-                    cols_to_drop.append(corr_list[i][j])
-        #Оставляем в исходном списке только колонки не из col_to_drop
-        exclude_list = [x for x in self.x_one_hot.columns.values if x not in cols_to_drop]
-        self.x_one_hot = self.x_one_hot[exclude_list]
-        self.vars_after_corr_cut = exclude_list
+    def exclude_corr_factors(self,mode):
+        if mode=='normal': x_corr = self.x_corr_matrix
+        if mode=='one-hot': x_corr = self.x_one_hot.corr()    
+        cols_drop=[]
+        for i in range(0,len(x_corr.columns)):
+            if x_corr.columns[i] not in cols_drop:
+                for j in range(i+1,len(x_corr.columns)):        
+                    if abs(x_corr.iloc[i][j])>self.corr_threshold: cols_drop.append(x_corr.iloc[j].name)
+        if mode=='normal': 
+            self.vars_after_corr_cut = list(set(self.x.columns) - set(cols_drop))
+            self.vars_after_corr_cut.sort()
+        if mode=='one-hot': 
+            self.vars_after_corr_cut_one_hot = list(set(self.x_one_hot.columns) - set(cols_drop))
+            self.vars_after_corr_cut_one_hot.sort()            
+        print('Dropped columns:', cols_drop)
+        if mode=='normal': self.x = self.x[self.vars_after_corr_cut]
+        if mode=='one-hot': self.x_one_hot = self.x_one_hot[self.vars_after_corr_cut_one_hot]
+            
         
     
     #Input - one variable name 
@@ -186,9 +164,10 @@ class Scorecard():
     def split_numeric(self,column_name):  
         x_train_t = np.array(self.x[column_name][self.x[column_name].notnull()]) #Exclude nulls 
         y_train_t = np.array(self.y[self.x[column_name].notnull()])
+        y_train_t = y_train_t.reshape(len(y_train_t),)
         x_train_t = x_train_t.reshape(x_train_t.shape[0], 1) #Need for DecisionTreeClassifier
         m_depth = int(np.log2(self.max_bins)) + 1 #Maximum tree depth
-        #bad_rate = self.y.mean()
+        bad_rate = y_train_t.mean()
         start = 1
         cv_scores = []
         cv = 3
@@ -213,7 +192,9 @@ class Scorecard():
         #One-hot encoding
         self.x[column_name] = self.x[column_name].fillna('MISSING')
         x_cat = pd.get_dummies(self.x[column_name],prefix = self.x[column_name].name)
-        #bad_rate = self.y.mean()
+        y_t = np.array(self.y)
+        y_t = y_t.reshape(len(y_t),)
+        bad_rate = y_t.mean()
         max_bins = max(self.x[column_name].nunique(),20)
         #Classification by decision tree
         m_depth = max_bins+1
@@ -222,7 +203,7 @@ class Scorecard():
         cv = 3
         for i in range(start,m_depth):
             d_tree = tree.DecisionTreeClassifier(criterion='gini', max_depth=i, min_samples_leaf=self.minimum_leaf) 
-            scores = cross_val_score(d_tree, x_cat, self.y, cv=cv,scoring='roc_auc') 
+            scores = cross_val_score(d_tree, x_cat, y_t, cv=cv,scoring='roc_auc') 
             cv_scores.append(scores.mean())
         #    print("Number of bins = ", i,"; GINI = ",2*scores.mean()-1)
         best = np.argmax(cv_scores) + start #Choose maximizing GINI on validation dataset
@@ -356,3 +337,5 @@ class Scorecard():
             #x_bin = self.split_categorial(column_name)          
             #if mode_output=='one-hot': return pd.get_dummies(x_bin,prefix=self.x[column_name].name,drop_first=True)
             #if mode_output=='normal': return pd.DataFrame(x_bin)
+    
+     
